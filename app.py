@@ -3,8 +3,10 @@ import yt_dlp
 import os
 import glob
 import shutil
+import socket
 import subprocess
 import sys
+import time
 
 app = Flask(__name__)
 
@@ -12,6 +14,10 @@ _updated_this_boot = False
 WRITABLE_COOKIE_PATH = "/tmp/cookies.txt"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DENO_PATH = os.path.join(APP_DIR, ".deno", "bin", "deno")
+BGUTIL_BIN = os.path.join(APP_DIR, ".bgutil", "bgutil-pot")
+BGUTIL_PORT = 4416
+
+_bgutil_process = None
 
 FORMAT_SELECTOR = (
     "bestvideo[height<=1080][vcodec^=avc1][filesize<49M]+bestaudio[acodec^=mp4a]/"
@@ -30,14 +36,50 @@ FORMAT_SELECTOR = (
     "best[height<=360]"
 )
 
+def is_port_open(port, host="127.0.0.1"):
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+def ensure_bgutil_running():
+    """Starts the PO Token provider server once per boot, if not already up."""
+    global _bgutil_process
+    if is_port_open(BGUTIL_PORT):
+        return True
+
+    if not os.path.exists(BGUTIL_BIN):
+        print(f"bgutil-pot binary not found at {BGUTIL_BIN}")
+        return False
+
+    try:
+        _bgutil_process = subprocess.Popen(
+            [BGUTIL_BIN, "server", "--host", "127.0.0.1", "--port", str(BGUTIL_PORT)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Give it a moment to bind the port
+        for _ in range(10):
+            if is_port_open(BGUTIL_PORT):
+                print("bgutil-pot server started.")
+                return True
+            time.sleep(0.5)
+        print("bgutil-pot server did not come up in time.")
+        return False
+    except Exception as e:
+        print(f"Failed to start bgutil-pot: {e}")
+        return False
+
+# Start it once when the module loads (i.e. on boot / cold start)
+ensure_bgutil_running()
+
 def js_runtime_opts():
-    """Tells yt-dlp where Deno lives and allows it to fetch its JS
-    challenge-solving script from GitHub (disabled by default)."""
     opts = {'remote_components': ['ejs:github']}
     if os.path.exists(DENO_PATH):
         opts['js_runtimes'] = {'deno': {'path': DENO_PATH}}
     else:
-        opts['js_runtimes'] = {'deno': {}}  # fall back to PATH lookup
+        opts['js_runtimes'] = {'deno': {}}
     return opts
 
 def update_yt_dlp():
@@ -49,7 +91,6 @@ def update_yt_dlp():
             [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
             check=True, timeout=30
         )
-        print("yt-dlp update check completed.")
     except Exception as e:
         print(f"yt-dlp update check failed: {e}")
     finally:
@@ -81,6 +122,17 @@ def force_update():
     update_yt_dlp()
     return f"yt-dlp version: {yt_dlp.version.__version__}"
 
+@app.route('/debug-pot', methods=['GET'])
+def debug_pot():
+    running = is_port_open(BGUTIL_PORT)
+    if not running:
+        running = ensure_bgutil_running()
+    return {
+        "bgutil_binary_exists": os.path.exists(BGUTIL_BIN),
+        "bgutil_server_running": running,
+        "port": BGUTIL_PORT,
+    }
+
 @app.route('/debug-jsruntime', methods=['GET'])
 def debug_jsruntime():
     info = {'expected_deno_path': DENO_PATH, 'deno_exists_at_path': os.path.exists(DENO_PATH)}
@@ -91,26 +143,11 @@ def debug_jsruntime():
         info['deno_check_error'] = str(e)
     return info
 
-@app.route('/debug-ffmpeg', methods=['GET'])
-def debug_ffmpeg():
-    try:
-        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10)
-        return {"ffmpeg_found": True, "version_line": result.stdout.splitlines()[0] if result.stdout else None}
-    except FileNotFoundError:
-        return {"ffmpeg_found": False}, 500
-    except Exception as e:
-        return {"error": str(e)}, 500
-
 @app.route('/debug-cookies', methods=['GET'])
 def debug_cookies():
     info = {'yt_dlp_version': yt_dlp.version.__version__}
     cookie_path = get_writable_cookie_file()
     info['cookie_path_used'] = cookie_path
-    if cookie_path:
-        try:
-            info['cookie_file_size_bytes'] = os.path.getsize(cookie_path)
-        except Exception as e:
-            info['error_reading_file'] = str(e)
     return info
 
 @app.route('/debug-formats', methods=['POST'])
@@ -119,6 +156,8 @@ def debug_formats():
         url = request.json.get('url')
         if not url:
             return "No URL provided", 400
+
+        ensure_bgutil_running()
 
         ydl_opts = {
             'extractor_args': {'youtube': {'player_client': ['android', 'web', 'mweb']}},
@@ -148,6 +187,7 @@ def debug_formats():
 def download_video():
     try:
         update_yt_dlp()
+        ensure_bgutil_running()
 
         url = request.json.get('url')
         if not url:
