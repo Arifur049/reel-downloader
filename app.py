@@ -14,27 +14,26 @@ def download_video():
     try:
         url = request.json.get('url')
         
-        # 1. Clean up any old files from previous failed runs
+        # 1. Clean up any old files
         for file in glob.glob("video.*"):
             os.remove(file)
             
-        # 2. 'b' forces yt-dlp to grab a pre-merged file (no ffmpeg needed)
-        # It prefers mp4, but will accept whatever pre-merged format exists
+        # 2. Add the disguise!
         ydl_opts = {
             'format': 'b[ext=mp4]/b', 
-            'outtmpl': 'video.%(ext)s'
+            'outtmpl': 'video.%(ext)s',
+            # This line tricks YouTube by pretending we are an embedded blog player
+            'extractor_args': {'youtube': ['player_client=web_embedded']} 
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
             
-        # 3. Find the downloaded file (whether it's .mp4, .webm, etc.)
+        # 3. Find the file and send it back
         downloaded_file = glob.glob("video.*")[0]
-        
         return send_file(downloaded_file, as_attachment=True)
         
     except Exception as e:
-        # If it crashes, send the exact error text back to Google Apps Script
         return str(e), 500
 
 if __name__ == '__main__':
