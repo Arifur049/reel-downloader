@@ -156,7 +156,12 @@ def debug_formats():
 
         # Verbose ON so Render logs show exactly why formats get dropped
         ydl_opts = {
-            'extractor_args': {'youtube': {'player_client': ['android', 'web', 'mweb']}},
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web', 'mweb'],
+                    'pot_bgutil_base': 'http://127.0.0.1:4416'   # ← ADDED
+                }
+            },
             'quiet': False,
             'no_warnings': False,
             'verbose': True,
@@ -197,7 +202,12 @@ def download_video():
             'format': FORMAT_SELECTOR,
             'merge_output_format': 'mp4',
             'outtmpl': 'video.%(ext)s',
-            'extractor_args': {'youtube': {'player_client': ['android', 'web', 'mweb']}},
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web', 'mweb'],
+                    'pot_bgutil_base': 'http://127.0.0.1:4416'   # ← ADDED
+                }
+            },
             'noplaylist': True,
             'quiet': False,
             'no_warnings': False,
