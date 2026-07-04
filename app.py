@@ -26,8 +26,6 @@ def update_yt_dlp():
         _updated_this_boot = True
 
 def find_cookie_file():
-    """Render Secret Files land at /etc/secrets/<filename>, and also in
-    the service root for non-Docker deploys. Check both."""
     candidates = [
         "/etc/secrets/cookies.txt",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
@@ -48,6 +46,38 @@ def force_update():
     update_yt_dlp()
     return f"yt-dlp version: {yt_dlp.version.__version__}"
 
+@app.route('/debug-cookies', methods=['GET'])
+def debug_cookies():
+    """Diagnostic: confirms whether a cookie file exists and looks valid,
+    without doing a full download."""
+    info = {}
+    info['yt_dlp_version'] = yt_dlp.version.__version__
+
+    cookie_path = find_cookie_file()
+    info['cookie_path_found'] = cookie_path
+
+    if cookie_path:
+        try:
+            size = os.path.getsize(cookie_path)
+            info['cookie_file_size_bytes'] = size
+            with open(cookie_path, 'r', errors='ignore') as f:
+                first_lines = [next(f) for _ in range(3)]
+            info['first_lines_preview'] = first_lines
+            # A real Netscape cookies.txt starts with this header
+            info['looks_like_netscape_format'] = any(
+                'Netscape' in line or line.startswith('.youtube.com') or line.startswith('# HTTP')
+                for line in first_lines
+            )
+        except Exception as e:
+            info['error_reading_file'] = str(e)
+    else:
+        info['checked_paths'] = [
+            "/etc/secrets/cookies.txt",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+        ]
+
+    return info
+
 @app.route('/download', methods=['POST'])
 def download_video():
     try:
@@ -64,15 +94,13 @@ def download_video():
             'format': 'b[ext=mp4]/b',
             'outtmpl': 'video.%(ext)s',
             'extractor_args': {
-                # web/mweb/android all honor cookies. Deliberately NOT
-                # including 'ios' -- it ignores cookies.txt entirely.
                 'youtube': {
                     'player_client': ['android', 'web', 'mweb']
                 }
             },
             'noplaylist': True,
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,   # temporarily verbose for debugging
+            'no_warnings': False,
         }
 
         cookie_path = find_cookie_file()
