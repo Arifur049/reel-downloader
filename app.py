@@ -10,12 +10,9 @@ app = Flask(__name__)
 
 _updated_this_boot = False
 WRITABLE_COOKIE_PATH = "/tmp/cookies.txt"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DENO_PATH = os.path.join(APP_DIR, ".deno", "bin", "deno")
 
-# Format selector, tried top to bottom:
-# 1080p (real or estimated size under 49MB) -> 720p -> 480p -> 360p, never lower.
-# Prefers avc1/mp4a (H.264/AAC) pairs first because those merge into mp4
-# instantly (just remuxed, no re-encoding). Falls back to any codec pairing
-# if avc1/mp4a isn't available at that resolution.
 FORMAT_SELECTOR = (
     "bestvideo[height<=1080][vcodec^=avc1][filesize<49M]+bestaudio[acodec^=mp4a]/"
     "bestvideo[height<=1080][filesize<49M]+bestaudio/"
@@ -33,6 +30,16 @@ FORMAT_SELECTOR = (
     "best[height<=360]"
 )
 
+def js_runtime_opts():
+    """Tells yt-dlp where Deno lives and allows it to fetch its JS
+    challenge-solving script from GitHub (disabled by default)."""
+    opts = {'remote_components': ['ejs:github']}
+    if os.path.exists(DENO_PATH):
+        opts['js_runtimes'] = {'deno': {'path': DENO_PATH}}
+    else:
+        opts['js_runtimes'] = {'deno': {}}  # fall back to PATH lookup
+    return opts
+
 def update_yt_dlp():
     global _updated_this_boot
     if _updated_this_boot:
@@ -40,8 +47,7 @@ def update_yt_dlp():
     try:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
-            check=True,
-            timeout=30
+            check=True, timeout=30
         )
         print("yt-dlp update check completed.")
     except Exception as e:
@@ -52,7 +58,7 @@ def update_yt_dlp():
 def get_writable_cookie_file():
     source_candidates = [
         "/etc/secrets/cookies.txt",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+        os.path.join(APP_DIR, "cookies.txt"),
     ]
     source_path = next((p for p in source_candidates if os.path.exists(p)), None)
     if not source_path:
@@ -75,18 +81,21 @@ def force_update():
     update_yt_dlp()
     return f"yt-dlp version: {yt_dlp.version.__version__}"
 
+@app.route('/debug-jsruntime', methods=['GET'])
+def debug_jsruntime():
+    info = {'expected_deno_path': DENO_PATH, 'deno_exists_at_path': os.path.exists(DENO_PATH)}
+    try:
+        result = subprocess.run([DENO_PATH, "--version"], capture_output=True, text=True, timeout=10)
+        info['deno_version_output'] = result.stdout.strip()
+    except Exception as e:
+        info['deno_check_error'] = str(e)
+    return info
+
 @app.route('/debug-ffmpeg', methods=['GET'])
 def debug_ffmpeg():
-    """Confirms ffmpeg is present and on PATH."""
     try:
-        result = subprocess.run(
-            ["ffmpeg", "-version"],
-            capture_output=True, text=True, timeout=10
-        )
-        return {
-            "ffmpeg_found": True,
-            "version_line": result.stdout.splitlines()[0] if result.stdout else None
-        }
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10)
+        return {"ffmpeg_found": True, "version_line": result.stdout.splitlines()[0] if result.stdout else None}
     except FileNotFoundError:
         return {"ffmpeg_found": False}, 500
     except Exception as e:
@@ -94,15 +103,12 @@ def debug_ffmpeg():
 
 @app.route('/debug-cookies', methods=['GET'])
 def debug_cookies():
-    info = {}
-    info['yt_dlp_version'] = yt_dlp.version.__version__
+    info = {'yt_dlp_version': yt_dlp.version.__version__}
     cookie_path = get_writable_cookie_file()
     info['cookie_path_used'] = cookie_path
     if cookie_path:
         try:
             info['cookie_file_size_bytes'] = os.path.getsize(cookie_path)
-            with open(cookie_path, 'r', errors='ignore') as f:
-                info['first_lines_preview'] = [next(f) for _ in range(3)]
         except Exception as e:
             info['error_reading_file'] = str(e)
     return info
@@ -119,6 +125,8 @@ def debug_formats():
             'quiet': True,
             'no_warnings': True,
         }
+        ydl_opts.update(js_runtime_opts())
+
         cookie_path = get_writable_cookie_file()
         if cookie_path:
             ydl_opts['cookiefile'] = cookie_path
@@ -127,13 +135,9 @@ def debug_formats():
             info = ydl.extract_info(url, download=False)
 
         formats = [{
-            'format_id': f.get('format_id'),
-            'ext': f.get('ext'),
-            'height': f.get('height'),
-            'vcodec': f.get('vcodec'),
-            'acodec': f.get('acodec'),
-            'filesize': f.get('filesize'),
-            'filesize_approx': f.get('filesize_approx'),
+            'format_id': f.get('format_id'), 'ext': f.get('ext'), 'height': f.get('height'),
+            'vcodec': f.get('vcodec'), 'acodec': f.get('acodec'),
+            'filesize': f.get('filesize'), 'filesize_approx': f.get('filesize_approx'),
         } for f in info.get('formats', [])]
 
         return {'title': info.get('title'), 'formats': formats}
@@ -149,8 +153,6 @@ def download_video():
         if not url:
             return "No URL provided", 400
 
-        # Clean up old files (any extension, since intermediate parts
-        # may exist before merge)
         for file in glob.glob("video.*"):
             os.remove(file)
 
@@ -163,6 +165,7 @@ def download_video():
             'quiet': False,
             'no_warnings': False,
         }
+        ydl_opts.update(js_runtime_opts())
 
         cookie_path = get_writable_cookie_file()
         if cookie_path:
@@ -171,7 +174,6 @@ def download_video():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # After merge, only video.mp4 should remain
         downloaded_file = "video.mp4" if os.path.exists("video.mp4") else None
         if not downloaded_file:
             remaining = glob.glob("video.*")
