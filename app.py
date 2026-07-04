@@ -44,22 +44,18 @@ def is_port_open(port, host="127.0.0.1"):
         return False
 
 def ensure_bgutil_running():
-    """Starts the PO Token provider server once per boot, if not already up."""
     global _bgutil_process
     if is_port_open(BGUTIL_PORT):
         return True
-
     if not os.path.exists(BGUTIL_BIN):
         print(f"bgutil-pot binary not found at {BGUTIL_BIN}")
         return False
-
     try:
         _bgutil_process = subprocess.Popen(
             [BGUTIL_BIN, "server", "--host", "127.0.0.1", "--port", str(BGUTIL_PORT)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        # Give it a moment to bind the port
         for _ in range(10):
             if is_port_open(BGUTIL_PORT):
                 print("bgutil-pot server started.")
@@ -71,7 +67,6 @@ def ensure_bgutil_running():
         print(f"Failed to start bgutil-pot: {e}")
         return False
 
-# Start it once when the module loads (i.e. on boot / cold start)
 ensure_bgutil_running()
 
 def js_runtime_opts():
@@ -159,10 +154,12 @@ def debug_formats():
 
         ensure_bgutil_running()
 
+        # Verbose ON so Render logs show exactly why formats get dropped
         ydl_opts = {
             'extractor_args': {'youtube': {'player_client': ['android', 'web', 'mweb']}},
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
+            'verbose': True,
         }
         ydl_opts.update(js_runtime_opts())
 
@@ -204,6 +201,7 @@ def download_video():
             'noplaylist': True,
             'quiet': False,
             'no_warnings': False,
+            'verbose': True,
         }
         ydl_opts.update(js_runtime_opts())
 
