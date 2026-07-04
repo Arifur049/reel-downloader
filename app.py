@@ -2,12 +2,14 @@ from flask import Flask, request, send_file
 import yt_dlp
 import os
 import glob
+import shutil
 import subprocess
 import sys
 
 app = Flask(__name__)
 
 _updated_this_boot = False
+WRITABLE_COOKIE_PATH = "/tmp/cookies.txt"
 
 def update_yt_dlp():
     global _updated_this_boot
@@ -25,17 +27,25 @@ def update_yt_dlp():
     finally:
         _updated_this_boot = True
 
-def find_cookie_file():
-    """Render Secret Files land at /etc/secrets/<filename>, and also in
-    the service root for non-Docker deploys. Check both."""
-    candidates = [
+def get_writable_cookie_file():
+    """Copies the read-only Secret File cookies.txt to /tmp so yt-dlp
+    can freely rewrite it during a session. Refreshes the copy from the
+    source each call so we always start from the latest secret."""
+    source_candidates = [
         "/etc/secrets/cookies.txt",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return None
+    source_path = next((p for p in source_candidates if os.path.exists(p)), None)
+
+    if not source_path:
+        return None
+
+    try:
+        shutil.copyfile(source_path, WRITABLE_COOKIE_PATH)
+        return WRITABLE_COOKIE_PATH
+    except Exception as e:
+        print(f"Failed to copy cookies to writable path: {e}")
+        return None
 
 @app.route('/ping', methods=['GET'])
 def ping():
@@ -47,6 +57,23 @@ def force_update():
     _updated_this_boot = False
     update_yt_dlp()
     return f"yt-dlp version: {yt_dlp.version.__version__}"
+
+@app.route('/debug-cookies', methods=['GET'])
+def debug_cookies():
+    info = {}
+    info['yt_dlp_version'] = yt_dlp.version.__version__
+    cookie_path = get_writable_cookie_file()
+    info['cookie_path_used'] = cookie_path
+
+    if cookie_path:
+        try:
+            info['cookie_file_size_bytes'] = os.path.getsize(cookie_path)
+            with open(cookie_path, 'r', errors='ignore') as f:
+                info['first_lines_preview'] = [next(f) for _ in range(3)]
+        except Exception as e:
+            info['error_reading_file'] = str(e)
+
+    return info
 
 @app.route('/download', methods=['POST'])
 def download_video():
@@ -64,18 +91,16 @@ def download_video():
             'format': 'b[ext=mp4]/b',
             'outtmpl': 'video.%(ext)s',
             'extractor_args': {
-                # web/mweb/android all honor cookies. Deliberately NOT
-                # including 'ios' -- it ignores cookies.txt entirely.
                 'youtube': {
                     'player_client': ['android', 'web', 'mweb']
                 }
             },
             'noplaylist': True,
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
         }
 
-        cookie_path = find_cookie_file()
+        cookie_path = get_writable_cookie_file()
         if cookie_path:
             ydl_opts['cookiefile'] = cookie_path
         else:
