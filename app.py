@@ -7,7 +7,6 @@ import sys
 
 app = Flask(__name__)
 
-# Track whether we've already tried updating yt-dlp since this instance woke up
 _updated_this_boot = False
 
 def update_yt_dlp():
@@ -26,13 +25,24 @@ def update_yt_dlp():
     finally:
         _updated_this_boot = True
 
+def find_cookie_file():
+    """Render Secret Files land at /etc/secrets/<filename>, and also in
+    the service root for non-Docker deploys. Check both."""
+    candidates = [
+        "/etc/secrets/cookies.txt",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
 @app.route('/ping', methods=['GET'])
 def ping():
     return "Awake!"
 
 @app.route('/update', methods=['GET'])
 def force_update():
-    """Manually trigger a yt-dlp update check without restarting the server."""
     global _updated_this_boot
     _updated_this_boot = False
     update_yt_dlp()
@@ -47,17 +57,17 @@ def download_video():
         if not url:
             return "No URL provided", 400
 
-        # 1. Clean up any old files
         for file in glob.glob("video.*"):
             os.remove(file)
 
-        # 2. Build download options
         ydl_opts = {
             'format': 'b[ext=mp4]/b',
             'outtmpl': 'video.%(ext)s',
             'extractor_args': {
+                # web/mweb/android all honor cookies. Deliberately NOT
+                # including 'ios' -- it ignores cookies.txt entirely.
                 'youtube': {
-                    'player_client': ['android', 'web_embedded', 'ios']
+                    'player_client': ['android', 'web', 'mweb']
                 }
             },
             'noplaylist': True,
@@ -65,16 +75,15 @@ def download_video():
             'no_warnings': True,
         }
 
-        # 3. Use cookies if present (export via "Get cookies.txt LOCALLY" extension)
-        cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
-        if os.path.exists(cookie_path):
+        cookie_path = find_cookie_file()
+        if cookie_path:
             ydl_opts['cookiefile'] = cookie_path
+        else:
+            print("No cookies.txt found — expect bot-check failures on this IP.")
 
-        # 4. Download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # 5. Find the file and send it back
         downloaded_files = glob.glob("video.*")
         if not downloaded_files:
             return "Download completed but no file was found", 500
