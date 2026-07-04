@@ -2,18 +2,48 @@ from flask import Flask, request, send_file
 import yt_dlp
 import os
 import glob
+import subprocess
+import sys
 
 app = Flask(__name__)
+
+# Track whether we've already tried updating yt-dlp since this instance woke up
+_updated_this_boot = False
+
+def update_yt_dlp():
+    global _updated_this_boot
+    if _updated_this_boot:
+        return
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
+            check=True,
+            timeout=30
+        )
+        print("yt-dlp update check completed.")
+    except Exception as e:
+        print(f"yt-dlp update check failed: {e}")
+    finally:
+        _updated_this_boot = True
 
 @app.route('/ping', methods=['GET'])
 def ping():
     return "Awake!"
 
+@app.route('/update', methods=['GET'])
+def force_update():
+    """Manually trigger a yt-dlp update check without restarting the server."""
+    global _updated_this_boot
+    _updated_this_boot = False
+    update_yt_dlp()
+    return f"yt-dlp version: {yt_dlp.version.__version__}"
+
 @app.route('/download', methods=['POST'])
 def download_video():
     try:
-        url = request.json.get('url')
+        update_yt_dlp()
 
+        url = request.json.get('url')
         if not url:
             return "No URL provided", 400
 
@@ -26,8 +56,6 @@ def download_video():
             'format': 'b[ext=mp4]/b',
             'outtmpl': 'video.%(ext)s',
             'extractor_args': {
-                # Try android and ios clients first (less likely to trigger
-                # bot-check), fall back to web_embedded
                 'youtube': {
                     'player_client': ['android', 'web_embedded', 'ios']
                 }
@@ -37,9 +65,7 @@ def download_video():
             'no_warnings': True,
         }
 
-        # 3. Use cookies if a cookies.txt file exists in the project root
-        #    (export this from your browser using "Get cookies.txt LOCALLY"
-        #    while logged into a throwaway/secondary Google account)
+        # 3. Use cookies if present (export via "Get cookies.txt LOCALLY" extension)
         cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
         if os.path.exists(cookie_path):
             ydl_opts['cookiefile'] = cookie_path
@@ -57,7 +83,6 @@ def download_video():
         return send_file(downloaded_file, as_attachment=True)
 
     except yt_dlp.utils.DownloadError as e:
-        # Common case: bot-check / cookies expired
         return f"yt-dlp download error: {str(e)}", 500
 
     except Exception as e:
